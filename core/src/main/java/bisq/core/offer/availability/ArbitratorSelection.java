@@ -21,72 +21,71 @@ import bisq.core.arbitration.Arbitrator;
 import bisq.core.arbitration.ArbitratorManager;
 import bisq.core.trade.statistics.TradeStatistics2;
 import bisq.core.trade.statistics.TradeStatisticsManager;
-
-import bisq.common.util.Tuple2;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-
+import bisq.network.p2p.NodeAddress;
+import javafx.collections.ObservableMap;
 import lombok.extern.slf4j.Slf4j;
 
-import static com.google.common.base.Preconditions.checkArgument;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Slf4j
-public class ArbitratorSelection {
-
-    public static Arbitrator getLeastUsedArbitrator(TradeStatisticsManager tradeStatisticsManager,
+public final class ArbitratorSelection {
+    public static Arbitrator getLeastUsedArbitrator(TradeStatisticsManager statsManager,
                                                     ArbitratorManager arbitratorManager) {
-        // We take last 100 entries from trade statistics
-        List<TradeStatistics2> list = new ArrayList<>(tradeStatisticsManager.getObservableTradeStatisticsSet());
-        list.sort(Comparator.comparing(TradeStatistics2::getTradeDate));
-        Collections.reverse(list);
-        if (!list.isEmpty()) {
-            int max = Math.min(list.size(), 100);
-            list = list.subList(0, max);
-        }
+        List<String> lastAddresses = lastUsedAddresses(statsManager);
 
-        // We stored only first 4 chars of arbitrators onion address
-        List<String> lastAddressesUsedInTrades = list.stream()
-                .filter(tradeStatistics2 -> tradeStatistics2.getExtraDataMap() != null)
-                .map(tradeStatistics2 -> tradeStatistics2.getExtraDataMap().get(TradeStatistics2.ARBITRATOR_ADDRESS))
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-
-        Set<String> arbitrators = arbitratorManager.getArbitratorsObservableMap().values().stream()
-                .map(arbitrator -> arbitrator.getNodeAddress().getHostName())
+        ObservableMap<NodeAddress, Arbitrator> nodeToArbitrator = arbitratorManager.getArbitratorsObservableMap();
+        Collection<Arbitrator> allArbitrators = nodeToArbitrator.values();
+        Set<String> arbitratorAddresses = allArbitrators.stream()
+                .map(Arbitrator::getNodeAddress)
+                .map(NodeAddress::getHostName)
                 .collect(Collectors.toSet());
 
-        String result = getLeastUsedArbitrator(lastAddressesUsedInTrades, arbitrators);
+        String leastUsedArbitrator = getLeastUsedArbitrator(lastAddresses, arbitratorAddresses);
 
-        Optional<Arbitrator> optionalArbitrator = arbitratorManager.getArbitratorsObservableMap().values().stream()
-                .filter(e -> e.getNodeAddress().getHostName().equals(result))
-                .findAny();
-        checkArgument(optionalArbitrator.isPresent(), "optionalArbitrator has to be present");
-        return optionalArbitrator.get();
+        return allArbitrators.stream()
+                .filter(e -> e.getNodeAddress().getHostName().equals(leastUsedArbitrator))
+                .findAny()
+                .orElseThrow(() -> new IllegalStateException("optionalArbitrator has to be present"));
     }
 
-    static String getLeastUsedArbitrator(List<String> lastAddressesUsedInTrades, Set<String> arbitrators) {
-        checkArgument(!arbitrators.isEmpty(), "arbitrators must not be empty");
-        List<Tuple2<String, AtomicInteger>> arbitratorTuples = arbitrators.stream()
-                .map(e -> new Tuple2<>(e, new AtomicInteger(0)))
+    private static List<String> lastUsedAddresses(TradeStatisticsManager statsManager) {
+        // We take last 100 entries from trade statistics
+        List<TradeStatistics2> lastStats = statsManager.getObservableTradeStatisticsSet()
+                .stream()
+                .sorted(Comparator.comparing(TradeStatistics2::getTradeDate).reversed())
+                .limit(100L)
                 .collect(Collectors.toList());
-        arbitratorTuples.forEach(tuple -> {
-            int count = (int) lastAddressesUsedInTrades.stream()
-                    .filter(tuple.first::startsWith) // we use only first 4 chars for comparing
-                    .mapToInt(e -> 1)
-                    .count();
-            tuple.second.set(count);
-        });
 
-        arbitratorTuples.sort(Comparator.comparing(e -> e.first));
-        arbitratorTuples.sort(Comparator.comparingInt(e -> e.second.get()));
-        return arbitratorTuples.get(0).first;
+        // We stored only first 4 chars of arbitrators onion address
+        return lastStats.stream()
+                .map(TradeStatistics2::getExtraDataMap)
+                .filter(Objects::nonNull)
+                .map(data -> data.get(TradeStatistics2.ARBITRATOR_ADDRESS))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
+    static String getLeastUsedArbitrator(Iterable<String> addresses, Collection<String> arbitratorAddresses) {
+        Map<String, Long> counts = arbitratorAddresses.stream()
+                .collect(Collectors.toMap(Function.identity(), a -> 1L));
+        addresses.forEach(arb -> counts.computeIfPresent(arb, (key, value) -> value + 1L));
+
+        Comparator<Map.Entry<String, Long>> byFrequency = Comparator.comparing(Map.Entry::getValue);
+        Comparator<Map.Entry<String, Long>> byName = Comparator.comparing(Map.Entry::getKey);
+        return counts.entrySet()
+                .stream()
+                .min(byFrequency.thenComparing(byName))
+                .map(Map.Entry::getKey)
+                .orElseThrow(() -> new IllegalStateException("no matching arbitrator"));
+    }
+
+    private ArbitratorSelection() {
     }
 }
