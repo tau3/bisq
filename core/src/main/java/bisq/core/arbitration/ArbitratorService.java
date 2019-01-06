@@ -17,28 +17,30 @@
 
 package bisq.core.arbitration;
 
-import bisq.core.app.BisqEnvironment;
-import bisq.core.filter.FilterManager;
-
-import bisq.network.p2p.NodeAddress;
-import bisq.network.p2p.P2PService;
-import bisq.network.p2p.storage.HashMapChangedListener;
-
 import bisq.common.app.DevEnv;
 import bisq.common.handlers.ErrorMessageHandler;
 import bisq.common.handlers.ResultHandler;
 import bisq.common.util.Utilities;
-
-import javax.inject.Inject;
-
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
-
+import bisq.core.app.BisqEnvironment;
+import bisq.core.filter.Filter;
+import bisq.core.filter.FilterManager;
+import bisq.network.p2p.NodeAddress;
+import bisq.network.p2p.P2PService;
+import bisq.network.p2p.storage.HashMapChangedListener;
+import bisq.network.p2p.storage.payload.ProtectedStorageEntry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.inject.Inject;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Used to store arbitrators profile and load map of arbitrators
@@ -99,25 +101,50 @@ public class ArbitratorService {
         return p2PService;
     }
 
-    public Map<NodeAddress, Arbitrator> getArbitrators() {
-        final List<String> bannedArbitrators = filterManager.getFilter() != null ? filterManager.getFilter().getArbitrators() : null;
-        if (bannedArbitrators != null)
-            log.warn("bannedArbitrators=" + bannedArbitrators);
-        Set<Arbitrator> arbitratorSet = p2PService.getDataMap().values().stream()
-                .filter(data -> data.getProtectedStoragePayload() instanceof Arbitrator)
-                .map(data -> (Arbitrator) data.getProtectedStoragePayload())
-                .filter(a -> bannedArbitrators == null ||
-                        !bannedArbitrators.contains(a.getNodeAddress().getHostName()))
-                .collect(Collectors.toSet());
+    public final Map<NodeAddress, Arbitrator> getArbitrators() {
+        Set<String> bannedHosts = getBannedHosts();
+        Set<Arbitrator> arbitrators = getAllowedArbitrators(bannedHosts);
+        return indexByAddress(arbitrators);
+    }
 
-        Map<NodeAddress, Arbitrator> map = new HashMap<>();
-        for (Arbitrator arbitrator : arbitratorSet) {
-            NodeAddress arbitratorNodeAddress = arbitrator.getNodeAddress();
-            if (!map.containsKey(arbitratorNodeAddress))
-                map.put(arbitratorNodeAddress, arbitrator);
-            else
-                log.warn("arbitratorAddress already exist in arbitrator map. Seems an arbitrator object is already registered with the same address.");
+    private Set<String> getBannedHosts() {
+        Collection<String> bannedHosts = Optional.ofNullable(filterManager.getFilter())
+                .map(Filter::getArbitrators)
+                .orElse(Collections.emptyList());
+        if (!bannedHosts.isEmpty()) {
+            log.warn("banned arbitrators: {}", bannedHosts);
         }
-        return map;
+        return new HashSet<>(bannedHosts);
+    }
+
+    private Set<Arbitrator> getAllowedArbitrators(Collection<String> bannedHosts) {
+        Map<?, ProtectedStorageEntry> data = p2PService.getDataMap();
+        Collection<ProtectedStorageEntry> entries = data.values();
+        return entries.stream()
+                .map(ProtectedStorageEntry::getProtectedStoragePayload)
+                .map(Arbitrator.class::cast)
+                .filter(Objects::nonNull)
+                .filter(arbitrator -> !isBanned(arbitrator.getNodeAddress(), bannedHosts))
+                .collect(Collectors.toSet());
+    }
+
+    private static boolean isBanned(NodeAddress address, Collection<String> bannedHosts) {
+        String host = address.getHostName();
+        return bannedHosts.contains(host);
+    }
+
+    private static Map<NodeAddress, Arbitrator> indexByAddress(Iterable<Arbitrator> arbitrators) {
+        Map<NodeAddress, Arbitrator> result = new HashMap<>();
+        for (Arbitrator arbitrator : arbitrators) {
+            NodeAddress address = arbitrator.getNodeAddress();
+            if (!result.containsKey(address)) {
+                result.put(address, arbitrator);
+            } else {
+                log.warn("arbitratorAddress {} already exists in arbitrator map. Seems an arbitrator object is already "
+                        + "registered with the same address.", address);
+            }
+        }
+
+        return result;
     }
 }
